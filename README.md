@@ -1,6 +1,8 @@
-# `flipperzero-template`🚀
+# `FlipperZero EM422EM Receiver`🚀
 
-A template for kick-starting a Rust + FlipperZero project using [`flipperzero-rs`](https://github.com/flipperzero-rs/flipperzero) 🐬❤️🦀.
+ Receive em422em power monitor readings using the SubGHz CC1101 based radio in the FlipperZero.
+
+🐬❤️🦀.
 
 # Usage
 
@@ -57,7 +59,3 @@ You can automatically build and run your binary using [`cargo-watch`](https://cr
 ```sh
 cargo watch -s 'cargo build --release && run-fap target/thumbv7em-none-eabihf/release/my-project.fap'
 ```
-
-# License
-
-This template is licensed under the [MIT License](https://github.com/flipperzero-rs/flipperzero/blob/v0.7.2/LICENSE).
