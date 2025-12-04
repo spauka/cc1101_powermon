@@ -1,0 +1,26 @@
+cargo-features = ["different-binary-name"]
+
+[package]
+name = "powermon-f0"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91.0"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[[bin]]
+name = "powermon-f0"
+filename = "powermon-f0.fap"
+bench = false
+test = false
+
+[dependencies]
+flipperzero = { version = "0.15.0" }
+flipperzero-sys = "0.15.0"
+flipperzero-rt = { version = "0.15.0" }
+modular-bitfield = "0.13.0"
+libm = "0.2.15"
+ufmt = "0.2.0"
+heapless = "0.9.1"
