@@ -1,20 +1,21 @@
-use core::{any::Any, ffi::CStr, fmt::{Debug, Write}};
+use core::{
+    any::Any,
+    ffi::CStr,
+    fmt::{Debug, Write},
+};
 use flipperzero::{debug, error, format, info, println};
 use flipperzero_sys::{
-    furi_hal_gpio_init, furi_hal_spi_acquire, furi_hal_spi_bus_trx, furi_hal_spi_release,
-    gpio_rf_sw_0, subghz_devices_begin, subghz_devices_deinit, subghz_devices_end,
-    subghz_devices_get_by_name, subghz_devices_get_data_gpio, subghz_devices_init,
-    FuriHalSpiBusHandle, GpioModeAnalog, GpioModeInput, GpioModeOutputPushPull, GpioPin,
-    GpioPullNo, GpioSpeedLow, SubGhzDeviceCC1101Int,
+    furi_hal_gpio_init, furi_hal_gpio_write, furi_hal_spi_acquire, furi_hal_spi_bus_trx,
+    furi_hal_spi_release, gpio_rf_sw_0, subghz_devices_begin, subghz_devices_deinit,
+    subghz_devices_end, subghz_devices_get_by_name, subghz_devices_get_data_gpio,
+    subghz_devices_init, FuriHalSpiBusHandle, GpioModeAnalog, GpioModeInput,
+    GpioModeOutputPushPull, GpioPin, GpioPullNo, GpioSpeedLow, SubGhzDeviceCC1101Int,
 };
-use modular_bitfield::prelude::*;
 use heapless::String;
+use modular_bitfield::prelude::*;
 
 use crate::cc1101::{
-    addresses::Register,
-    constants::*,
-    logging::REGISTER_DUMP_BUFFER_SIZE,
-    registers::*,
+    addresses::Register, constants::*, logging::REGISTER_DUMP_BUFFER_SIZE, registers::*,
 };
 const MAX_SPI_BUF: usize = 65;
 static SUBGHZ_DEVICE_CC1101_INT_NAME: &CStr = c"cc1101_int";
@@ -135,7 +136,9 @@ impl CC1101Device {
             .gdo_config
             .set_gdo1_cfg(GDO_PIN_CONFIG::HighImpedance);
 
-        // Set up RF Switch
+        // Set up RF Switch to 300 - 348MHz path permanently
+        // See https://github.com/flipperdevices/flipperzero-firmware/blob/c9ab2b6827fc4d646e98ad0fc15a264240b58986/targets/f7/furi_hal/furi_hal_subghz.c#L348
+        // for settings
         unsafe {
             furi_hal_gpio_init(
                 &gpio_rf_sw_0,
@@ -143,36 +146,31 @@ impl CC1101Device {
                 GpioPullNo,
                 GpioSpeedLow,
             );
+            furi_hal_gpio_write(&gpio_rf_sw_0, false);
         }
+        // Write to device
         new_self
             .gdo_config
             .set_gdo2_cfg(GDO_PIN_CONFIG::HardwareZero);
-
-        // Write to device
+        new_self.gdo_config.set_gdo2_inv(true);
         new_self.write_register(new_self.gdo_config);
 
         return new_self;
     }
 
-    fn spi_send_command(&self, command: CMD) -> u8 {
-        let spi_tx_buf: [u8; 1] = [command as u8];
-        let mut spi_rx_buf: [u8; 1] = [0x00];
+    pub fn spi_send_command(&self, command: CMD) -> u8 {
+        let spi_tx: u8 = command as u8;
+        let mut spi_rx: u8 = 0x00;
 
         unsafe {
             furi_hal_spi_acquire(self.handle);
-            furi_hal_spi_bus_trx(
-                self.handle,
-                spi_tx_buf.as_ptr(),
-                spi_rx_buf.as_mut_ptr(),
-                spi_tx_buf.len(),
-                200,
-            );
+            furi_hal_spi_bus_trx(self.handle, &spi_tx, &mut spi_rx, 1, 200);
             furi_hal_spi_release(self.handle);
         }
-        return spi_rx_buf[0];
+        return spi_rx;
     }
 
-    fn spi_read_burst(&self, addr: u8, buf: &mut [u8]) {
+    pub fn spi_read_burst(&self, addr: u8, buf: &mut [u8]) {
         if buf.is_empty() || buf.len() + 1 > MAX_SPI_BUF {
             return;
         }
@@ -201,7 +199,7 @@ impl CC1101Device {
         buf.copy_from_slice(&rx_buf[1..(buf.len() + 1)]);
     }
 
-    fn spi_write_burst(&self, addr: u8, buf: &[u8]) -> () {
+    pub fn spi_write_burst(&self, addr: u8, buf: &[u8]) -> () {
         if buf.is_empty() || buf.len() + 1 > MAX_SPI_BUF {
             return;
         }
@@ -232,17 +230,17 @@ impl CC1101Device {
         }
     }
 
-    fn read_register<const S: usize, T: Register + From<[u8; S]>>(&self) -> T {
+    pub fn read_register<const S: usize, T: Register + From<[u8; S]>>(&self) -> T {
         let mut raw = [0u8; S];
         self.spi_read_burst(T::ADDRESS, &mut raw);
         T::from(raw)
     }
 
-    fn write_register<const S: usize, T: Register + Into<[u8; S]>>(&self, register: T) {
+    pub fn write_register<const S: usize, T: Register + Into<[u8; S]>>(&self, register: T) {
         self.spi_write_burst(T::ADDRESS, &register.into());
     }
 
-    fn sync_field<const S: usize, T, F>(&mut self, selector: F)
+    pub fn sync_field<const S: usize, T, F>(&mut self, selector: F)
     where
         T: Register + From<[u8; S]>,
         F: FnOnce(&mut Self) -> &mut T,
@@ -252,7 +250,7 @@ impl CC1101Device {
         *slot = value;
     }
 
-    fn dump_register(&self, reg: &impl Debug) {
+    pub fn dump_register(&self, reg: &impl Debug) {
         let mut buffer = String::<REGISTER_DUMP_BUFFER_SIZE>::new();
         write!(&mut buffer, "{:?}", reg).ok();
         debug!("{}", buffer.as_str());

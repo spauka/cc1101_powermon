@@ -60,14 +60,14 @@ pub struct PKTLEN {
 #[bitfield]
 #[derive(Debug, Clone, Copy)]
 pub struct PKTCTRL {
-    pub adr_chk: B2,
+    pub adr_chk: PKT_ADDR_CHECK,
     pub append_status: bool,
     pub crc_autoflush: bool,
     #[skip]
     __: B1,
     pub pqt: B3,
 
-    pub length_config: B2,
+    pub length_config: PKT_LENGTH_CONFIG,
     pub crc_en: bool,
     #[skip]
     __: B1,
@@ -110,16 +110,16 @@ pub struct FREQSYNTHCTRL {
 #[bitfield]
 #[derive(Debug, Clone, Copy)]
 pub struct FREQCTRL {
-    pub freq0: u8,
-    pub freq1: u8,
     pub freq2: u8,
+    pub freq1: u8,
+    pub freq0: u8,
 }
 
 
 /// Helper function to set frequency from MHz
 impl FREQCTRL {
     pub fn set_freq_mhz(&mut self, freq_mhz: f32) {
-        let freq_word = ((freq_mhz * 1_000_000.0 / F_XOSC) * (1u64 << 16) as f32) as u32;
+        let freq_word = ((freq_mhz * 1_000_000.0 / F_XOSC) * (1u32 << 16) as f32) as u32;
         self.set_freq0((freq_word & 0xFF) as u8);
         self.set_freq1(((freq_word >> 8) & 0xFF) as u8);
         self.set_freq2(((freq_word >> 16) & 0x3F) as u8);
@@ -128,7 +128,7 @@ impl FREQCTRL {
     pub fn get_freq_mhz(&self) -> f32 {
         let freq_word =
             (self.freq2() as u32) << 16 | (self.freq1() as u32) << 8 | self.freq0() as u32;
-        (freq_word as f32) * F_XOSC / (1u64 << 16) as f32 / 1_000_000.0
+        (freq_word as f32) * F_XOSC / (1u32 << 16) as f32 / 1_000_000.0
     }
 }
 
@@ -445,8 +445,7 @@ pub struct AGCTEST {
 pub struct TESTSETTINGS {
     pub test2: u8,
     pub test1: u8,
-    pub test0: B7,
-    pub vco_sel_cal_en: bool, // FIXME
+    pub test0: u8,
 }
 
 

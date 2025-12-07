@@ -45,6 +45,23 @@ pub enum PKT_FORMAT {
     ASYNC_SERIAL,
 }
 
+#[derive(Debug, Clone, Copy, Specifier)]
+pub enum PKT_ADDR_CHECK {
+    NONE,
+    CHECK_NO_BROADCAST,
+    CHECK_ZERO_BROADCAST,
+    CHECK_ZERO_FF_BROADCAST,
+}
+
+
+#[derive(Debug, Clone, Copy, Specifier)]
+pub enum PKT_LENGTH_CONFIG {
+    FIXED,
+    VARIABLE,
+    INFINITE,
+    _RESERVED,
+}
+
 
 #[derive(Debug, Clone, Copy, Specifier)]
 pub enum MAX_DVGA_GAIN {
