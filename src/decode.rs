@@ -1,3 +1,5 @@
+use core::cmp;
+
 const SCALE_KW: f32 = 0.4799;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,9 +137,9 @@ fn sum_checksum(packet: &[u8; 8]) -> u8 {
 
 fn decode_word_from_packet(packet: &[u8; 8]) -> f32 {
     let mantissa = u16::from_be_bytes([packet[4], packet[5]]);
-    let exponent = packet[6] as i32 - 1;
+    let exponent = packet[6] as i32;
     let mantissa_ratio = mantissa as f32 / 65536.0;
-    SCALE_KW * mantissa_ratio * ((2 << exponent) as f32)
+    SCALE_KW * mantissa_ratio * ((1 << exponent) as f32)
 }
 
 #[inline(always)]
