@@ -14,6 +14,8 @@ pub enum DecodeError {
     SyncNotFound,
     InsufficientSymbols,
     ChecksumMismatch { expected: u8, actual: u8 },
+    Timeout,
+    Overflow,
 }
 
 pub fn decode_power(rx_buf: &[u8; 128], read_bytes: usize) -> Result<DecodeResult, DecodeError> {

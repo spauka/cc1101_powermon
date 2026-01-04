@@ -5,11 +5,12 @@ use core::{
 };
 use flipperzero::{debug, error, format, info, println};
 use flipperzero_sys::{
-    furi_hal_gpio_init, furi_hal_gpio_write, furi_hal_spi_acquire, furi_hal_spi_bus_trx,
-    furi_hal_spi_release, gpio_rf_sw_0, subghz_devices_begin, subghz_devices_deinit,
-    subghz_devices_end, subghz_devices_get_by_name, subghz_devices_get_data_gpio,
-    subghz_devices_init, FuriHalSpiBusHandle, GpioModeAnalog, GpioModeInput,
-    GpioModeOutputPushPull, GpioPin, GpioPullNo, GpioSpeedLow, SubGhzDeviceCC1101Int,
+    furi_hal_gpio_init, furi_hal_gpio_read, furi_hal_gpio_write, furi_hal_spi_acquire,
+    furi_hal_spi_bus_trx, furi_hal_spi_release, gpio_rf_sw_0, subghz_devices_begin,
+    subghz_devices_deinit, subghz_devices_end, subghz_devices_get_by_name,
+    subghz_devices_get_data_gpio, subghz_devices_init, FuriHalSpiBusHandle, GpioModeAnalog,
+    GpioModeInput, GpioModeOutputPushPull, GpioPin, GpioPullNo, GpioSpeedLow,
+    SubGhzDeviceCC1101Int,
 };
 use heapless::String;
 use modular_bitfield::prelude::*;
@@ -20,11 +21,18 @@ use crate::cc1101::{
 const MAX_SPI_BUF: usize = 65;
 static SUBGHZ_DEVICE_CC1101_INT_NAME: &CStr = c"cc1101_int";
 
+#[derive(PartialEq)]
+pub enum GDO_PIN_MODE {
+    INPUT,
+    OUTPUT
+}
+
 /// Represents the full CC1101 register map in RAM.
 pub struct CC1101Device {
     pub handle: *const FuriHalSpiBusHandle,
     pub subghz: *const flipperzero_sys::SubGhzDevice,
     pub subghz_gdo0: *const flipperzero_sys::GpioPin,
+    pub subghz_gdo0_mode: GDO_PIN_MODE,
     pub gdo_config: GDOCONFIG,
     pub fifo_thr: FIFOTHR,
     pub sync: SYNC,
@@ -85,6 +93,7 @@ impl CC1101Device {
             handle,
             subghz: subghz,
             subghz_gdo0: subghz_gdo0,
+            subghz_gdo0_mode: GDO_PIN_MODE::INPUT,
             gdo_config: GDOCONFIG::new(),
             fifo_thr: FIFOTHR::new(),
             sync: SYNC::new(),
@@ -156,6 +165,20 @@ impl CC1101Device {
         new_self.write_register(new_self.gdo_config);
 
         return new_self;
+    }
+
+    pub fn read_gdo0(&self) -> bool {
+        if self.subghz_gdo0_mode == GDO_PIN_MODE::INPUT {
+            unsafe { return furi_hal_gpio_read(self.subghz_gdo0) }
+        }
+        panic!("Invalid GDO Mode for Read");
+    }
+
+    pub fn write_gdo0(&self, value: bool) -> () {
+        if self.subghz_gdo0_mode == GDO_PIN_MODE::OUTPUT {
+            unsafe { furi_hal_gpio_write(self.subghz_gdo0, value) }
+        }
+        panic!("Invalid GDO Mode for Write")
     }
 
     pub fn spi_send_command(&self, command: CMD) -> u8 {
@@ -368,5 +391,7 @@ impl Drop for CC1101Device {
         }
         // Power down radio
         self.spi_send_command(CMD::SPWD);
+
+        debug!("Closed radio");
     }
 }
