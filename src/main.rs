@@ -8,14 +8,21 @@
 extern crate flipperzero_rt;
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::AtomicU32;
-use core::{default, ffi::c_void, ffi::CStr};
+use core::{ffi::c_void, ffi::CStr};
 
-use flipperzero::furi::hal::power::Power;
 use flipperzero::{debug, error, info, println};
 use flipperzero_rt::{entry, manifest};
 use flipperzero_sys::{
-    Align, AlignCenter, DialogEx, FuriTimer, FuriTimerTypeOnce, Gui, LightBlue, LightGreen, LightRed, View, ViewDispatcher, ViewDispatcherTypeFullscreen, dialog_ex_alloc, dialog_ex_free, dialog_ex_get_view, dialog_ex_set_context, dialog_ex_set_header, dialog_ex_set_result_callback, dialog_ex_set_text, furi_hal_cdc_send, furi_hal_light_set, furi_hal_usb_reinit, furi_hal_usb_set_config, furi_record_close, furi_record_open, furi_timer_alloc, furi_timer_free, furi_timer_is_running, furi_timer_start, furi_timer_stop, usb_cdc_dual, usb_cdc_single, view_dispatcher_add_view, view_dispatcher_alloc, view_dispatcher_attach_to_gui, view_dispatcher_free, view_dispatcher_remove_view, view_dispatcher_run, view_dispatcher_set_event_callback_context, view_dispatcher_set_navigation_event_callback, view_dispatcher_stop, view_dispatcher_switch_to_view
+    dialog_ex_alloc, dialog_ex_free, dialog_ex_get_view, dialog_ex_set_context,
+    dialog_ex_set_header, dialog_ex_set_text, furi_hal_cdc_send, furi_hal_light_set,
+    furi_hal_usb_reinit, furi_hal_usb_set_config, furi_record_close, furi_record_open,
+    furi_timer_alloc, furi_timer_free, furi_timer_is_running, furi_timer_start, furi_timer_stop,
+    usb_cdc_dual, usb_cdc_single, view_dispatcher_add_view, view_dispatcher_alloc,
+    view_dispatcher_attach_to_gui, view_dispatcher_free, view_dispatcher_remove_view,
+    view_dispatcher_run, view_dispatcher_set_event_callback_context,
+    view_dispatcher_set_navigation_event_callback, view_dispatcher_stop,
+    view_dispatcher_switch_to_view, AlignCenter, DialogEx, FuriTimer, FuriTimerTypeOnce, Gui,
+    LightBlue, LightGreen, LightRed, ViewDispatcher, ViewDispatcherTypeFullscreen,
 };
 use flipperzero_sys::{
     furi_delay_tick, furi_get_tick, furi_hal_power_suppress_charge_enter,
@@ -27,17 +34,18 @@ use crate::cc1101::{
     CMD, FOC_LIMIT, FOC_PRE_K, FREQSYNTHCAL, GDO_PIN_CONFIG, MAGN_TARGET, MOD_FORMAT, NUM_PREAMBLE,
     PKTCTRL, PKT_ADDR_CHECK, PKT_FORMAT, PKT_LENGTH_CONFIG, SYNC_MODE,
 };
+use crate::state::{AtomicState, State};
 
 use heapless::{format, String};
 
 mod cc1101;
 mod debug;
 mod decode;
+mod state;
 
 static RECORD_GUI: &CStr = c"gui";
 static APP_NAME: &CStr = c"PowerMon";
 static START_TEXT: &CStr = c"Power: x.xxx W";
-static EXIT_TEXT: &CStr = c"Exit";
 
 static BAUD_RATE: f32 = 16150.0;
 static FSK_DEV: f32 = 84_000.0;
@@ -61,15 +69,6 @@ enum VIEWS {
     MAIN = 0,
 }
 
-#[derive(PartialEq)]
-enum STATE {
-    INITIALIZED,
-    RUNNING,
-    READING,
-    STOPPING,
-    STOPPED,
-}
-
 struct PowerMonApp<'a> {
     gui: &'a mut Gui,
     view_dispatcher: &'a mut ViewDispatcher,
@@ -79,7 +78,7 @@ struct PowerMonApp<'a> {
 
     cc1101_device: &'a mut CC1101Device,
     last_packet: u64,
-    state: STATE,
+    state: AtomicState,
 }
 
 extern "C" fn view_dispatcher_navigation_callback(context: *mut c_void) -> bool {
@@ -131,7 +130,7 @@ impl<'a> PowerMonApp<'a> {
                 timer: None,
                 cc1101_device: cc1101_device,
                 last_packet: 0,
-                state: STATE::INITIALIZED,
+                state: AtomicState::new(State::Initialized),
             };
 
             debug!("Registering GUI");
@@ -191,7 +190,7 @@ impl<'a> PowerMonApp<'a> {
 
     pub fn run(&mut self) {
         let self_ptr = self as *mut _ as *mut c_void;
-        if self.state != STATE::INITIALIZED {
+        if self.state.load() != State::Initialized {
             panic!("Called run from an invalid state");
         }
         unsafe {
@@ -201,7 +200,7 @@ impl<'a> PowerMonApp<'a> {
                 Some(&mut *(furi_timer_alloc(Some(timer_callback), FuriTimerTypeOnce, self_ptr)));
             let timer = self.timer.as_mut().expect("");
             furi_timer_start(*timer, 100);
-            self.state = STATE::RUNNING;
+            self.state.store(State::Running);
             view_dispatcher_run(self.view_dispatcher);
         }
         debug!("Exited");
@@ -210,7 +209,7 @@ impl<'a> PowerMonApp<'a> {
     pub fn navigation_callback(&mut self) -> bool {
         debug!("Exiting...");
 
-        if self.state == STATE::RUNNING {
+        if self.state.load() == State::Running {
             let timer = self.timer.as_mut().expect("");
             // We can exit immediately if the radio is not active
             unsafe {
@@ -219,11 +218,11 @@ impl<'a> PowerMonApp<'a> {
                 }
                 view_dispatcher_stop(self.view_dispatcher);
             }
-            self.state = STATE::STOPPED;
-        } else if self.state == STATE::READING {
+            self.state.store(State::Stopped);
+        } else if self.state.load() == State::Reading {
             debug!("Marking stop");
             // We're in the middle of a radio read, so request stop when completed
-            self.state = STATE::STOPPING;
+            self.state.store(State::Stopping);
         } else {
             panic!("Called stop in an invalid state");
         }
@@ -231,8 +230,17 @@ impl<'a> PowerMonApp<'a> {
     }
 
     pub fn timer_callback(&mut self) -> () {
-        // Set state so we don't try and exit during a read
-        self.state = STATE::READING;
+        // Move to READING unless a stop was requested in the meantime.
+        let read_state = self.state.update_if(
+            |s| !matches!(s, State::Stopping | State::Stopped),
+            State::Reading,
+        );
+        if matches!(read_state, State::Stopping | State::Stopped) {
+            debug!("Stop requested before read started");
+            unsafe { view_dispatcher_stop(self.view_dispatcher) };
+            self.state.store(State::Stopped);
+            return;
+        }
 
         debug!("Timer run! Trying to read power");
         let timer = self.timer.as_mut().expect("");
@@ -301,10 +309,10 @@ impl<'a> PowerMonApp<'a> {
         }
 
         // If we asked for a stop, then stop
-        if unsafe { core::ptr::read_volatile(&self.state) } == STATE::STOPPING {
+        if self.state.load() == State::Stopping {
             debug!("Stopping view");
             unsafe { view_dispatcher_stop(self.view_dispatcher) };
-            self.state = STATE::STOPPED;
+            self.state.store(State::Stopped);
         } else {
             // Schedule the next callback
             if power.is_err() {
@@ -313,7 +321,15 @@ impl<'a> PowerMonApp<'a> {
             } else {
                 unsafe { furi_timer_start(*timer, 5900) };
             }
-            self.state = STATE::RUNNING;
+            let next_state = self.state.update_if(
+                |s| !matches!(s, State::Stopping | State::Stopped),
+                State::Running,
+            );
+            if matches!(next_state, State::Stopping | State::Stopped) {
+                debug!("Stop requested while rescheduling");
+                unsafe { view_dispatcher_stop(self.view_dispatcher) };
+                self.state.store(State::Stopped);
+            }
         }
     }
 }
