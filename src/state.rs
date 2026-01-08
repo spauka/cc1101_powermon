@@ -1,8 +1,9 @@
+use core::marker::PhantomData;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum State {
+pub enum ProgramState {
     Initialized = 0,
     Running = 1,
     Reading = 2,
@@ -10,62 +11,69 @@ pub enum State {
     Stopped = 4,
 }
 
-impl State {
+impl From<u8> for ProgramState {
     #[inline]
-    pub const fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    #[inline]
-    pub const fn from_u8(value: u8) -> Self {
+    fn from(value: u8) -> Self {
         match value {
-            0 => State::Initialized,
-            1 => State::Running,
-            2 => State::Reading,
-            3 => State::Stopping,
-            _ => State::Stopped,
+            0 => ProgramState::Initialized,
+            1 => ProgramState::Running,
+            2 => ProgramState::Reading,
+            3 => ProgramState::Stopping,
+            _ => ProgramState::Stopped,
         }
     }
 }
 
-pub struct AtomicState {
+impl From<ProgramState> for u8 {
+    #[inline]
+    fn from(s: ProgramState) -> Self {
+        s as u8
+    }
+}
+
+pub struct AtomicState<T: Copy + Into<u8> + From<u8>> {
     inner: AtomicU8,
+    _marker: PhantomData<T>,
 }
 
-impl AtomicState {
+impl<T: Copy + Into<u8> + From<u8>> AtomicState<T> {
     #[inline]
-    pub const fn new(initial: State) -> Self {
+    pub fn new(initial: T) -> Self {
         Self {
-            inner: AtomicU8::new(initial as u8),
+            inner: AtomicU8::new(initial.into()),
+            _marker: PhantomData,
         }
     }
 
     #[inline]
-    pub fn load(&self) -> State {
-        State::from_u8(self.inner.load(Ordering::Acquire))
+    pub fn load(&self) -> T {
+        T::from(self.inner.load(Ordering::Acquire))
     }
 
     #[inline]
-    pub fn store(&self, next: State) {
-        self.inner.store(next.as_u8(), Ordering::Release);
+    pub fn store(&self, next: T) {
+        self.inner.store(next.into(), Ordering::Release);
     }
 
     #[inline]
-    pub fn update_if<F>(&self, predicate: F, next: State) -> State
+    pub fn update_if<F>(&self, predicate: F, next: T) -> Result<T, T>
     where
-        F: Fn(State) -> bool,
+        F: Fn(T) -> bool,
     {
-        let _ = self
+        let res = self
             .inner
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                let current_state = State::from_u8(current);
+                let current_state: T = T::from(current);
                 if predicate(current_state) {
-                    Some(next.as_u8())
+                    Some(next.into())
                 } else {
                     None
                 }
             });
 
-        self.load()
+        match res {
+            Ok(r) => Ok(T::from(r)),
+            Err(r) => Err(T::from(r))
+        }
     }
 }

@@ -7,17 +7,18 @@
 // Required for panic handler
 extern crate flipperzero_rt;
 
-use core::cell::UnsafeCell;
+mod string_buffer;
+mod vcp;
+
 use core::{ffi::c_void, ffi::CStr};
 
 use flipperzero::{debug, error, info, println};
 use flipperzero_rt::{entry, manifest};
 use flipperzero_sys::{
     dialog_ex_alloc, dialog_ex_free, dialog_ex_get_view, dialog_ex_set_context,
-    dialog_ex_set_header, dialog_ex_set_text, furi_hal_cdc_send, furi_hal_light_set,
-    furi_hal_usb_reinit, furi_hal_usb_set_config, furi_record_close, furi_record_open,
-    furi_timer_alloc, furi_timer_free, furi_timer_is_running, furi_timer_start, furi_timer_stop,
-    usb_cdc_dual, usb_cdc_single, view_dispatcher_add_view, view_dispatcher_alloc,
+    dialog_ex_set_header, dialog_ex_set_text, furi_hal_light_set, furi_record_close,
+    furi_record_open, furi_timer_alloc, furi_timer_free, furi_timer_is_running, furi_timer_start,
+    furi_timer_stop, view_dispatcher_add_view, view_dispatcher_alloc,
     view_dispatcher_attach_to_gui, view_dispatcher_free, view_dispatcher_remove_view,
     view_dispatcher_run, view_dispatcher_set_event_callback_context,
     view_dispatcher_set_navigation_event_callback, view_dispatcher_stop,
@@ -34,9 +35,10 @@ use crate::cc1101::{
     CMD, FOC_LIMIT, FOC_PRE_K, FREQSYNTHCAL, GDO_PIN_CONFIG, MAGN_TARGET, MOD_FORMAT, NUM_PREAMBLE,
     PKTCTRL, PKT_ADDR_CHECK, PKT_FORMAT, PKT_LENGTH_CONFIG, SYNC_MODE,
 };
-use crate::state::{AtomicState, State};
+use crate::state::{AtomicState, ProgramState};
+use crate::vcp::VCP;
 
-use heapless::{format, String};
+use heapless::format;
 
 mod cc1101;
 mod debug;
@@ -73,47 +75,24 @@ struct PowerMonApp<'a> {
     gui: &'a mut Gui,
     view_dispatcher: &'a mut ViewDispatcher,
     main_view: &'a mut DialogEx,
-    timer: Option<&'a mut FuriTimer>,
+    radio_timer: Option<&'a mut FuriTimer>,
     current_view: VIEWS,
 
     cc1101_device: &'a mut CC1101Device,
     last_packet: u64,
-    state: AtomicState,
+    state: AtomicState<ProgramState>,
+    vcp: VCP,
 }
 
 extern "C" fn view_dispatcher_navigation_callback(context: *mut c_void) -> bool {
     let power_mon_app: &mut PowerMonApp = unsafe { &mut *(context as *mut _) };
     debug!("Navigation callback to 0x{:08X}", context.addr());
-    debug!(
-        "Address of view dispatcher: 0x{:08X}",
-        (power_mon_app.view_dispatcher as *const _ as *const c_void).addr()
-    );
-    debug!(
-        "Address of CC1101 device: 0x{:08X}",
-        (power_mon_app.cc1101_device as *const _ as *const c_void).addr()
-    );
-    debug!(
-        "Ptr to SUBGHz Device: 0x{:08X}",
-        (power_mon_app.cc1101_device.subghz as *const _ as *const c_void).addr()
-    );
     power_mon_app.navigation_callback()
 }
 
 extern "C" fn timer_callback(context: *mut c_void) -> () {
     let power_mon_app: &mut PowerMonApp = unsafe { &mut *(context as *mut _) };
     debug!("Timer callback to 0x{:08X}", context.addr());
-    debug!(
-        "Address of view dispatcher: 0x{:08X}",
-        (power_mon_app.view_dispatcher as *const _ as *const c_void).addr()
-    );
-    debug!(
-        "Address of CC1101 device: 0x{:08X}",
-        (power_mon_app.cc1101_device as *const _ as *const c_void).addr()
-    );
-    debug!(
-        "Ptr to SUBGHz Device: 0x{:08X}",
-        (power_mon_app.cc1101_device.subghz as *const _ as *const c_void).addr()
-    );
     power_mon_app.timer_callback()
 }
 
@@ -127,10 +106,11 @@ impl<'a> PowerMonApp<'a> {
                 view_dispatcher: &mut *(view_dispatcher_alloc()),
                 main_view: &mut *(dialog_ex_alloc()),
                 current_view: VIEWS::MAIN,
-                timer: None,
+                radio_timer: None,
                 cc1101_device: cc1101_device,
                 last_packet: 0,
-                state: AtomicState::new(State::Initialized),
+                state: AtomicState::new(ProgramState::Initialized),
+                vcp: VCP::new(),
             };
 
             debug!("Registering GUI");
@@ -190,17 +170,18 @@ impl<'a> PowerMonApp<'a> {
 
     pub fn run(&mut self) {
         let self_ptr = self as *mut _ as *mut c_void;
-        if self.state.load() != State::Initialized {
+        if self.state.load() != ProgramState::Initialized {
             panic!("Called run from an invalid state");
         }
+        self.vcp.init();
         unsafe {
             view_dispatcher_set_event_callback_context(self.view_dispatcher, self_ptr);
             dialog_ex_set_context(self.main_view, self_ptr);
-            self.timer =
+            self.radio_timer =
                 Some(&mut *(furi_timer_alloc(Some(timer_callback), FuriTimerTypeOnce, self_ptr)));
-            let timer = self.timer.as_mut().expect("");
+            let timer = self.radio_timer.as_mut().expect("");
             furi_timer_start(*timer, 100);
-            self.state.store(State::Running);
+            self.state.store(ProgramState::Running);
             view_dispatcher_run(self.view_dispatcher);
         }
         debug!("Exited");
@@ -209,8 +190,8 @@ impl<'a> PowerMonApp<'a> {
     pub fn navigation_callback(&mut self) -> bool {
         debug!("Exiting...");
 
-        if self.state.load() == State::Running {
-            let timer = self.timer.as_mut().expect("");
+        if self.state.load() == ProgramState::Running {
+            let timer = self.radio_timer.as_mut().expect("");
             // We can exit immediately if the radio is not active
             unsafe {
                 if furi_timer_is_running(*timer) == 1 {
@@ -218,11 +199,11 @@ impl<'a> PowerMonApp<'a> {
                 }
                 view_dispatcher_stop(self.view_dispatcher);
             }
-            self.state.store(State::Stopped);
-        } else if self.state.load() == State::Reading {
+            self.state.store(ProgramState::Stopped);
+        } else if self.state.load() == ProgramState::Reading {
             debug!("Marking stop");
             // We're in the middle of a radio read, so request stop when completed
-            self.state.store(State::Stopping);
+            self.state.store(ProgramState::Stopping);
         } else {
             panic!("Called stop in an invalid state");
         }
@@ -232,18 +213,22 @@ impl<'a> PowerMonApp<'a> {
     pub fn timer_callback(&mut self) -> () {
         // Move to READING unless a stop was requested in the meantime.
         let read_state = self.state.update_if(
-            |s| !matches!(s, State::Stopping | State::Stopped),
-            State::Reading,
+            |s| !matches!(s, ProgramState::Stopping | ProgramState::Stopped),
+            ProgramState::Reading,
         );
-        if matches!(read_state, State::Stopping | State::Stopped) {
+
+        if matches!(
+            read_state,
+            Err(ProgramState::Stopping) | Err(ProgramState::Stopped)
+        ) {
             debug!("Stop requested before read started");
             unsafe { view_dispatcher_stop(self.view_dispatcher) };
-            self.state.store(State::Stopped);
+            self.state.store(ProgramState::Stopped);
             return;
         }
 
         debug!("Timer run! Trying to read power");
-        let timer = self.timer.as_mut().expect("");
+        let timer = self.radio_timer.as_mut().expect("");
         let current_tick = get_tick();
         let interval = current_tick - self.last_packet;
         let power: Result<decode::DecodeResult, decode::DecodeError>;
@@ -301,18 +286,15 @@ impl<'a> PowerMonApp<'a> {
                 AlignCenter,
                 AlignCenter,
             );
-            let mut mut_power_str: UnsafeCell<_> = power_str.into();
-            let mut newline_str: String<2> = String::try_from("\r\n").expect("");
-            let test = mut_power_str.get().as_ref().expect("");
-            furi_hal_cdc_send(1, mut_power_str.get_mut().as_mut_ptr(), test.len() as u16);
-            furi_hal_cdc_send(1, newline_str.as_mut_ptr(), 2);
         }
+        self.vcp.write(power_str);
+        self.vcp.write_str::<2>("\r\n");
 
         // If we asked for a stop, then stop
-        if self.state.load() == State::Stopping {
+        if self.state.load() == ProgramState::Stopping {
             debug!("Stopping view");
             unsafe { view_dispatcher_stop(self.view_dispatcher) };
-            self.state.store(State::Stopped);
+            self.state.store(ProgramState::Stopped);
         } else {
             // Schedule the next callback
             if power.is_err() {
@@ -322,13 +304,16 @@ impl<'a> PowerMonApp<'a> {
                 unsafe { furi_timer_start(*timer, 5900) };
             }
             let next_state = self.state.update_if(
-                |s| !matches!(s, State::Stopping | State::Stopped),
-                State::Running,
+                |s| !matches!(s, ProgramState::Stopping | ProgramState::Stopped),
+                ProgramState::Running,
             );
-            if matches!(next_state, State::Stopping | State::Stopped) {
+            if matches!(
+                next_state,
+                Err(ProgramState::Stopping) | Err(ProgramState::Stopped)
+            ) {
                 debug!("Stop requested while rescheduling");
                 unsafe { view_dispatcher_stop(self.view_dispatcher) };
-                self.state.store(State::Stopped);
+                self.state.store(ProgramState::Stopped);
             }
         }
     }
@@ -338,7 +323,7 @@ impl<'a> Drop for PowerMonApp<'a> {
     fn drop(&mut self) {
         unsafe {
             // Deallocate Timer
-            match &mut self.timer {
+            match &mut self.radio_timer {
                 Some(timer) => furi_timer_free(*timer),
                 None => (),
             };
@@ -594,16 +579,8 @@ fn main(_args: Option<&CStr>) -> i32 {
         (cc1101_device.subghz as *const _ as *const c_void).addr()
     );
 
-    // Set dual USB CDC
-    unsafe { furi_hal_usb_set_config(&raw mut usb_cdc_dual, core::ptr::null_mut()) };
-
     let mut power_mon_app = PowerMonApp::new(&mut cc1101_device);
     power_mon_app.run();
-
-    unsafe {
-        furi_hal_usb_set_config(&raw mut usb_cdc_single, core::ptr::null_mut());
-        furi_hal_usb_reinit()
-    };
 
     println!("Done, Exiting!");
 
